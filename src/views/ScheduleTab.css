@@ -161,6 +161,27 @@
   font-size: 13px;
   color: var(--text3);
   padding: 12px 0;
+  transition: color 0.15s;
+}
+
+.rest-day-over {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.day-content.drop-target {
+  background: var(--accent-dim);
+  border-radius: var(--radius-sm);
+}
+
+.workout-card.dragging {
+  opacity: 0.3;
+}
+
+.drag-overlay {
+  box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+  cursor: grabbing;
+  transform: scale(1.02);
 }
 
 .schedule-loading,

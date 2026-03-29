@@ -1,4 +1,14 @@
 import { useState, useEffect, useRef } from 'react'
+import {
+  DndContext,
+  DragOverlay,
+  PointerSensor,
+  TouchSensor,
+  useSensor,
+  useSensors,
+  useDroppable,
+  useDraggable,
+} from '@dnd-kit/core'
 import { supabase } from '../lib/supabase.js'
 import WorkoutDetail from '../components/WorkoutDetail.jsx'
 import './ScheduleTab.css'
@@ -33,15 +43,54 @@ function groupByMonth(days) {
   return groups
 }
 
+function DraggableWorkoutCard({ workout, onTap }) {
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+    id: workout.id,
+    disabled: workout.status === 'completed',
+  })
+
+  return (
+    <div
+      ref={setNodeRef}
+      className={`workout-card status-${workout.status} ${isDragging ? 'dragging' : ''}`}
+      {...listeners}
+      {...attributes}
+      onClick={onTap}
+    >
+      <div className="workout-card-left">
+        <span className="workout-name">{workout.name}</span>
+        <span className="workout-meta">
+          {workout.estimated_duration_minutes}m · {workout.type}
+        </span>
+      </div>
+      <StatusBadge status={workout.status} />
+    </div>
+  )
+}
+
+function DroppableDay({ dateStr, children, isOver }) {
+  const { setNodeRef } = useDroppable({ id: dateStr })
+  return (
+    <div ref={setNodeRef} className={`day-content ${isOver ? 'drop-target' : ''}`}>
+      {children}
+    </div>
+  )
+}
+
 export default function ScheduleTab({ onStartWorkout }) {
   const [workouts, setWorkouts] = useState([])
   const [loading, setLoading] = useState(true)
   const [selectedWorkout, setSelectedWorkout] = useState(null)
+  const [activeWorkout, setActiveWorkout] = useState(null) // being dragged
+  const [overId, setOverId] = useState(null)
   const todayRef = useRef(null)
 
-  useEffect(() => {
-    fetchWorkouts()
-  }, [])
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 250, tolerance: 8 } })
+  )
+
+  useEffect(() => { fetchWorkouts() }, [])
 
   useEffect(() => {
     if (!loading && todayRef.current) {
@@ -55,24 +104,17 @@ export default function ScheduleTab({ onStartWorkout }) {
       .from('workouts')
       .select('*')
       .order('scheduled_date', { ascending: true })
-
     if (!error) setWorkouts(data || [])
     setLoading(false)
   }
 
-  // Group workouts by date and fill in visible date range
   function buildDayList() {
     if (workouts.length === 0) return []
-
     const workoutMap = {}
-    workouts.forEach(w => {
-      workoutMap[w.scheduled_date] = w
-    })
+    workouts.forEach(w => { workoutMap[w.scheduled_date] = w })
 
     const first = new Date(workouts[0].scheduled_date)
     const last = new Date(workouts[workouts.length - 1].scheduled_date)
-
-    // Show 7 days before first and 7 after last
     const start = new Date(first)
     start.setDate(start.getDate() - 7)
     const end = new Date(last)
@@ -86,6 +128,32 @@ export default function ScheduleTab({ onStartWorkout }) {
       cur.setDate(cur.getDate() + 1)
     }
     return days
+  }
+
+  async function handleDragEnd({ active, over }) {
+    setActiveWorkout(null)
+    setOverId(null)
+    if (!over || active.id === over.id) return
+
+    const draggedWorkout = workouts.find(w => w.id === active.id)
+    const targetDate = over.id // droppable id is the dateStr
+    if (!draggedWorkout || draggedWorkout.scheduled_date === targetDate) return
+
+    const targetWorkout = workouts.find(w => w.scheduled_date === targetDate)
+
+    if (targetWorkout) {
+      // Swap dates
+      const fromDate = draggedWorkout.scheduled_date
+      await Promise.all([
+        supabase.from('workouts').update({ scheduled_date: targetDate }).eq('id', draggedWorkout.id),
+        supabase.from('workouts').update({ scheduled_date: fromDate }).eq('id', targetWorkout.id),
+      ])
+    } else {
+      // Move to empty day
+      await supabase.from('workouts').update({ scheduled_date: targetDate }).eq('id', draggedWorkout.id)
+    }
+
+    fetchWorkouts()
   }
 
   const days = buildDayList()
@@ -108,51 +176,67 @@ export default function ScheduleTab({ onStartWorkout }) {
   }
 
   return (
-    <div className="schedule-tab">
-      <div className="schedule-header">
-        <h1>Schedule</h1>
-      </div>
-      <div className="schedule-list">
-        {groupByMonth(days).map(({ monthLabel, days: monthDays }) => (
-          <div key={monthLabel} className="month-group">
-            <div className="month-header">{monthLabel}</div>
-            {monthDays.map(({ dateStr, workout }) => {
-              const { dow, day } = formatDate(dateStr)
-              const today = isToday(dateStr)
-              return (
-                <div
-                  key={dateStr}
-                  className={`day-row ${today ? 'today' : ''}`}
-                  ref={today ? todayRef : null}
-                >
-                  <div className="day-label">
-                    <span className="day-dow">{dow}</span>
-                    <span className={`day-num ${today ? 'today-num' : ''}`}>{day}</span>
-                  </div>
-                  <div className="day-content">
-                    {workout ? (
-                      <button
-                        className={`workout-card status-${workout.status}`}
-                        onClick={() => setSelectedWorkout(workout)}
-                      >
-                        <div className="workout-card-left">
-                          <span className="workout-name">{workout.name}</span>
-                          <span className="workout-meta">
-                            {workout.estimated_duration_minutes}m · {workout.type}
-                          </span>
+    <DndContext
+      sensors={sensors}
+      onDragStart={({ active }) => setActiveWorkout(workouts.find(w => w.id === active.id))}
+      onDragOver={({ over }) => setOverId(over?.id ?? null)}
+      onDragEnd={handleDragEnd}
+      onDragCancel={() => { setActiveWorkout(null); setOverId(null) }}
+    >
+      <div className="schedule-tab">
+        <div className="schedule-header">
+          <h1>Schedule</h1>
+        </div>
+        <div className="schedule-list">
+          {groupByMonth(days).map(({ monthLabel, days: monthDays }) => (
+            <div key={monthLabel} className="month-group">
+              <div className="month-header">{monthLabel}</div>
+              {monthDays.map(({ dateStr, workout }) => {
+                const { dow, day } = formatDate(dateStr)
+                const today = isToday(dateStr)
+                return (
+                  <div
+                    key={dateStr}
+                    className={`day-row ${today ? 'today' : ''}`}
+                    ref={today ? todayRef : null}
+                  >
+                    <div className="day-label">
+                      <span className="day-dow">{dow}</span>
+                      <span className={`day-num ${today ? 'today-num' : ''}`}>{day}</span>
+                    </div>
+                    <DroppableDay dateStr={dateStr} isOver={overId === dateStr}>
+                      {workout ? (
+                        <DraggableWorkoutCard
+                          workout={workout}
+                          onTap={() => setSelectedWorkout(workout)}
+                        />
+                      ) : (
+                        <div className={`rest-day ${overId === dateStr ? 'rest-day-over' : ''}`}>
+                          {overId === dateStr ? 'Drop here' : 'Rest'}
                         </div>
-                        <StatusBadge status={workout.status} />
-                      </button>
-                    ) : (
-                      <div className="rest-day">Rest</div>
-                    )}
+                      )}
+                    </DroppableDay>
                   </div>
-                </div>
-              )
-            })}
-          </div>
-        ))}
+                )
+              })}
+            </div>
+          ))}
+        </div>
       </div>
+
+      <DragOverlay>
+        {activeWorkout && (
+          <div className={`workout-card status-${activeWorkout.status} drag-overlay`}>
+            <div className="workout-card-left">
+              <span className="workout-name">{activeWorkout.name}</span>
+              <span className="workout-meta">
+                {activeWorkout.estimated_duration_minutes}m · {activeWorkout.type}
+              </span>
+            </div>
+            <StatusBadge status={activeWorkout.status} />
+          </div>
+        )}
+      </DragOverlay>
 
       {selectedWorkout && (
         <WorkoutDetail
@@ -165,7 +249,7 @@ export default function ScheduleTab({ onStartWorkout }) {
           onRescheduled={fetchWorkouts}
         />
       )}
-    </div>
+    </DndContext>
   )
 }
 
