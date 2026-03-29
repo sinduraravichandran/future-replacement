@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install:*)",
+      "Bash(/Users/sinduraravichandran/WebDev/future-replacement/package.json:*)",
+      "Bash(node -e \":*)"
+    ]
+  }
+}
